@@ -1,0 +1,877 @@
+---
+title: "FCE_serumMICT_Analysis"
+author: "Patrick Barko"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+
+knitr::knit_hooks$set(plot = function(x, options)  {
+  paste0(knitr::hook_plot_tex(x, options), "\n\\FloatBarrier\n")
+})
+
+library(ggpubr)
+library(tidyverse)
+library(arsenal)
+library(chisq.posthoc.test)
+library(reshape2)
+library(rstatix)
+
+library(forcats)
+
+library(kableExtra)
+
+
+iqr = function(z, lower = 0.25, upper = 0.75) {
+  data.frame(
+    y = median(z),
+    ymin = quantile(z, lower),
+    ymax = quantile(z, upper)
+  )
+}
+
+#plot_cols <- c("#56B4E9", "#D55E00", "#CC79A7")
+
+#plot_cols <- c("#44AA99", "#332288", "#AA4499")
+
+plot_cols <- c("#D55E00", "#009E73", "#56B4E9")
+
+
+#D55E00
+
+```
+
+# **Load and Inspect Data**
+
+```{r}
+serum_MICT <- read.csv("FCE_serumMICT_Data.csv")
+```
+
+
+```{r, include=F}
+#check grouping to exclude non-FCE cases and relevel factor
+table(serum_MICT$Group)
+
+serum_MICT <- serum_MICT[serum_MICT$Group != "EPI", ]
+
+serum_MICT$Group <- factor(serum_MICT$Group, levels = c("HC", "FCE"))
+
+levels(serum_MICT$Group)[levels(serum_MICT$Group)=='HC'] <- 'Healthy'
+
+table(serum_MICT$Group)
+```
+
+
+
+```{r, include=F}
+#check grouping to exclude non-FCE cases and relevel factor
+
+table(serum_MICT$SubGroup)
+
+serum_MICT <- serum_MICT[serum_MICT$SubGroup != "Q", ]
+
+serum_MICT$SubGroup <- case_when(serum_MICT$SubGroup == "HC" ~ "Healthy", 
+                         serum_MICT$SubGroup == "CIE" ~ "CIE",
+                         serum_MICT$SubGroup == "SCL" ~ "LGITL")
+
+serum_MICT$SubGroup <- factor(serum_MICT$SubGroup, levels = c("Healthy", "CIE", "LGITL"))
+
+#levels(serum_MICT$SubGroup)[levels(serum_MICT$SubGroup)=='HC'] <- 'Healthy'
+
+table(serum_MICT$SubGroup)
+
+```
+
+
+```{r, include=F}
+#final clean-up
+
+serum_MICT$Tryptamine[serum_MICT$Tryptamine == "ND"] <- NA
+
+serum_MICT$Tryptamine <- as.numeric(serum_MICT$Tryptamine)
+
+names(serum_MICT) <- gsub(" ", "_", names(serum_MICT))
+names(serum_MICT) <- gsub("3-", "", names(serum_MICT))
+names(serum_MICT) <- gsub("-", "_", names(serum_MICT))
+
+str(serum_MICT)
+
+```
+
+
+## **Exclude Ineligible Cats**
+
+Cats with CE that received antibiotics or glucocorticoid drugs were excluded, as these can affect the analytes of interest. 
+
+**Antibiotics:**
+
+```{r}
+#remove cats that had received abx or glucocorticoids
+
+table(serum_MICT$Antibiotics)
+
+serum_MICT <- serum_MICT[serum_MICT$Antibiotics != "YES", ]
+
+#table(serum_MICT$Antibiotics)
+
+```
+
+Five cats were removed.
+
+**Glucocorticoids:**
+
+```{r}
+#remove cats that had received abx or glucocorticoids
+
+table(serum_MICT$Glucocorticoids)
+
+serum_MICT <- serum_MICT[serum_MICT$Glucocorticoids != "YES", ]
+
+#table(serum_MICT$Glucocorticoids)
+
+```
+
+Three cats were removed.
+
+**fTLI and fPLI:**
+
+Cats with CE will be removed if fTLI concentrations are consistent with EPI (<12 ug/L). 
+
+Healthy controls will be removed to exclude those with subclinical pancreatopathies or enteropathies (increased fPLI, decreased cobalamin, decreased/increased folate). Healthy control samples lacking quantification of these variables will also be removed. 
+
+```{r}
+
+remove_NA <- rownames(serum_MICT[serum_MICT$Group == "Healthy" & is.na(serum_MICT$fTLI), ])
+
+serum_MICT <- serum_MICT[!rownames(serum_MICT) %in% remove_NA, ]
+
+```
+
+How many NA samples were removed?
+
+```{r}
+length(remove_NA)
+```
+
+
+```{r}
+
+subclinical <- data.frame()
+
+remove_fPLI <- rownames(serum_MICT[serum_MICT$Group == "Healthy" & serum_MICT$fPLI > 3.5, ])
+
+subclinical <- serum_MICT[remove_fPLI, ]
+
+serum_MICT <- serum_MICT[!rownames(serum_MICT) %in% remove_fPLI, ]
+
+```
+
+Five healthy control cats had missing values and 6 had fPLI>3.5 uG/mL. 2 CE had had EPI. All were excluded 
+
+**Cobalamin:**
+
+```{r}
+
+remove_b12 <- rownames(serum_MICT[serum_MICT$Group == "Healthy" & serum_MICT$Cobalamin < 290, ])
+
+```
+
+There were no healthy control samples with serum cobalamin <290 ng/mL. 
+
+**Folate:**
+
+```{r}
+remove_folate_low <- rownames(serum_MICT[serum_MICT$Group == "Healthy" & serum_MICT$Folate < 9.7, ])
+
+subclinical <- rbind(subclinical, serum_MICT[remove_folate_low, ])
+
+serum_MICT <- serum_MICT[!rownames(serum_MICT) %in% remove_folate_low, ]
+
+```
+
+Five healthy control cats had folate <9.7 ug/mL.
+
+```{r}
+remove_folate_high <- rownames(serum_MICT[serum_MICT$Group == "Healthy" & serum_MICT$Folate >21.6, ])
+
+subclinical <- rbind(subclinical, serum_MICT[remove_folate_high, ])
+
+
+serum_MICT <- serum_MICT[!rownames(serum_MICT) %in% remove_folate_high, ]
+
+```
+
+Nine healthy control cats had folate >21.6 ug/mL.
+
+**Final composition of groups:**
+
+```{r}
+table(serum_MICT$SubGroup)
+
+```
+
+How many cats were removed due to screening for GI biomarkers?
+
+```{r}
+nrow(subclinical)
+```
+
+
+```{R, include = F}
+#separate datasets into MICT measurements and sample metadata
+
+MICT <- serum_MICT[, 15:26]
+
+#convert units of Trp from ng/mL to ug/mL for readability
+MICT$Trp <- MICT$Trp/1000
+
+#convert units of Trp from ng/mL to ug/mL
+MICT$Kynurenine <- MICT$Kynurenine/1000
+
+write.csv(MICT, "serumMICT_FCE.csv")
+
+meta <- serum_MICT[, 1:14]
+
+write.csv(meta[, -c(2:3, 7:8, 15:16)], "metadataMICT_FCE.csv")
+
+```
+
+
+## **Summarize Data Loaded in this Session**
+
+### **LCMS Measurements of Indole Catabolites:**
+
+```{r}
+str(MICT)
+```
+
+There are a total of 12 numeric variables containing absolute quantitative measurements (via LCMS) of Trp and various Trp catabolites, including microbial indole catabolites of Trp. 
+
+### **Sample Metadata:**
+
+```{r}
+str(meta)
+```
+
+The metadata contains information about the individual cats, including demographic data, disease group (healthy vs chronic enteropathy), disease subgroup (healthy, inflammatory bowel disease, small cell lymphoma), and various clinical biomarkers of gastrointestinal (cobalamin, folate) and pancreatic (fTLI, fPLI) function. 
+
+\newpage
+
+# **Analysis of Sample Metadata - Demographics and Clinical Variables**
+
+## **Check Normality of Numeric Variables**
+
+```{r}
+sw_res <- select_if(meta, is.numeric) %>% as.matrix() %>% apply(2, shapiro.test)
+
+sw_p_val <- sapply(sw_res, '[[', 'p.value')
+sw_W <- sapply(sw_res, '[[', 'statistic')
+
+sw_p_val <- as.data.frame(cbind(sw_W, sw_p_val))
+names(sw_p_val) <- c("W Statistic","P-Value")
+sw_p_val$Normal_Dist <- ifelse(sw_p_val$`P-Value` < 0.05, "NON-Normal", "Normal")
+
+kable(sw_p_val, caption = "Shapiro-Wilk Test (Raw)") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+```{r, warning=F, message=F}
+ggplot(melt(meta),aes(x=value)) + geom_histogram() + facet_wrap(~variable, scales = "free") +
+  ggtitle("Histograms, Raw Values")
+
+```
+
+```{r}
+
+library(moments)
+
+skew_kurt_meta <- cbind(
+  (select_if(meta, is.numeric) %>% 
+  na.omit() %>% 
+  as.matrix() %>% 
+  apply(2, skewness) %>% 
+  data.frame()),
+  
+  (select_if(meta, is.numeric) %>% 
+  na.omit() %>% 
+  as.matrix() %>% 
+  apply(2, kurtosis) %>% 
+  data.frame())
+)
+
+names(skew_kurt_meta) <- c("Skew", "Kurtosis")
+
+kable(skew_kurt_meta, caption = "Skew and Kurtosis (Raw)") %>%
+  kable_styling(latex_options = "HOLD_position")
+ 
+```
+
+All numerical variables in the sample metadata violate assumption of normality based on the shapiro-wilk test. Age and BCS appear approximately normal in the histograms. There are issues with skewness and kurtosis. In particular, cobalamin appears left skewed and fTLI and fPLI are right skewed. I will use non-parametric tests on the raw values. 
+
+## **Detecting Differences in Demographic and Clinical Variables**
+
+### **Numerical Variables**
+
+Kruskal-Wallis tests with post-hoc Dunn's tests controlling false discovery using the BH FDR method.
+
+```{r, results="asis"}
+stats_tab2 <- tableby(SubGroup ~ kwt(Age) + kwt(BCS) + kwt(Cobalamin) + kwt(Folate) + kwt(fPLI) + kwt(fTLI), 
+                     data = meta, numeric.stats=c("median", "q1q3", "min", "max", "iqr","mean", "sd"))
+
+summary(stats_tab2, pfootnote=TRUE, total=FALSE)
+
+```
+
+There are significant differences among groups with respect to Age, BCS, serum cobalamin, and serum fTLI
+
+**Post-Hoc Dunn's test: Age**
+
+```{r}
+dunn_test(Age ~ SubGroup,
+  data = meta, p.adjust.method = "BH")
+```
+
+Cats with SCL are significantly older than healthy cats, but no other significant differences among groups
+
+**Post-Hoc Dunn's test: BCS**
+
+```{r}
+dunn_test(BCS ~ SubGroup,
+  data = meta, p.adjust.method = "BH")
+```
+Cats with IBD and SCL have significantly lower BCS than healthy cats. No differences between IBD and SCL.
+
+
+**Post-Hoc Dunn's test: Cobalamin**
+
+```{r}
+dunn_test(Cobalamin ~ SubGroup,
+  data = meta, p.adjust.method = "BH")
+```
+
+Cats with IBD and SCL have significantly lower cobalamin than healthy cats. No differences between IBD and SCL. 
+
+**Post-Hoc Dunn's test: fTLI**
+
+```{r}
+dunn_test(fTLI ~ SubGroup,
+  data = meta, p.adjust.method = "BH")
+```
+
+**Post-Hoc Dunn's test: fPLI**
+
+```{r}
+dunn_test(fPLI ~ SubGroup,
+  data = meta, p.adjust.method = "BH")
+```
+
+Cats with SCL have significantly higher fTLI compared with healthy controls and IBD 
+
+**Plot Results**
+
+```{r}
+my_comparisons <- list( c("IBD", "HC"), c("LGITL", "HC"), c("IBD", "LGITL"))
+
+labs <- c("Age (years)", "BCS (1-9)", "Serum Cobalamin (ng/L)", "Serum Folate (ng/L)", "fPLI (µg/L)", "fTLI (µg/L)")
+names(labs) <- c("Age", "BCS", "Cobalamin", "Folate", "fPLI", "fTLI")
+
+labeller_fx <- function(variable,value){
+  return(labs[value])
+}
+
+names(meta[, c(2, 4, 7:10, 12)])
+
+ggplot(melt(meta[, c(2, 4, 7:10, 12)]), aes(x=SubGroup, y=value, fill = SubGroup) ) + 
+  geom_boxplot() +
+    labs(x = "", 
+         y = "",
+         fill = "Group") + 
+  scale_fill_manual(values = plot_cols) +
+  stat_compare_means(comparisons = my_comparisons, label = "p.signif", hide.ns = T, vjust = 0.5,
+                     symnum.args <- list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 2), 
+                                         symbols = c("****", "***", "**", "*", "ns"))) +
+  theme(legend.position="bottom") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  facet_wrap(~variable, scales = "free", labeller = labeller_fx)
+```
+
+### **Catagorical Variables**
+
+```{r, results="asis"}
+
+meta$Sex <- ifelse(as.character(meta$Sex) == "MC", "MN", as.character(meta$Sex))
+meta$Sex <- factor(meta$Sex)
+
+```
+
+Healthy vs IBD vs SCL (chi squared)
+
+```{r, results="asis"}
+stats_tab4 <- tableby(SubGroup ~ chisq(Sex), data = meta)
+
+summary(stats_tab4, pfootnote=TRUE, total=FALSE)
+
+```
+\newpage
+
+# **Analysis of Serum Tryptophan and Tryptophan Catabolites**
+
+```{r}
+#replace NA with zero, these were samples below the limit of quantification for the assay
+
+MICT <- MICT %>% 
+    mutate_at(c(1:12), ~replace_na(.,0))
+```
+
+## **Assess Normality of Distributions**
+
+**Raw values:**
+
+```{r}
+sw_res <- select_if(MICT, is.numeric) %>% as.matrix() %>% apply(2, shapiro.test)
+
+sw_p_val <- sapply(sw_res, '[[', 'p.value')
+sw_W <- sapply(sw_res, '[[', 'statistic')
+
+sw_p_val <- as.data.frame(cbind(sw_W, sw_p_val))
+names(sw_p_val) <- c("W Statistic","P-Value")
+sw_p_val$Normal_Dist <- ifelse(sw_p_val$`P-Value` < 0.05, "NON-Normal", "Normal")
+
+kable(sw_p_val, caption = "Shapiro-Wilk Test (Raw)") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+```{r, warning=F, message=F}
+ggplot(melt(MICT),aes(x=value)) + geom_histogram() + facet_wrap(~variable, scales = "free") +
+  ggtitle("Histograms, Raw Values")
+
+```
+
+```{r}
+
+skew_kurt_MICT_raw <- cbind(
+  (select_if(MICT, is.numeric) %>% 
+  na.omit() %>% 
+  as.matrix() %>% 
+  apply(2, skewness) %>% 
+  data.frame()),
+  
+  (select_if(MICT, is.numeric) %>% 
+  na.omit() %>% 
+  as.matrix() %>% 
+  apply(2, kurtosis) %>% 
+  data.frame() )
+)
+
+names(skew_kurt_MICT_raw) <- c("Skew", "Kurtosis")
+
+kable(skew_kurt_MICT_raw, caption = "Skew and Kurtosis (Raw Values)") %>%
+  kable_styling(latex_options = "HOLD_position")
+ 
+```
+
+
+## **Descriptive and Inferential Statistics for Trp and its Catabolites**
+
+```{r}
+
+#add groups to MICT df
+MICT$Group <- meta$Group[match(rownames(meta), rownames(MICT))]
+
+MICT$SubGroup <- meta$SubGroup[match(rownames(meta), rownames(MICT))]
+
+```
+
+
+```{r, results="asis"}
+## create a vector specifying the variable names
+myvars <- names(MICT)[1:12]
+
+## paste them together, separated by the + sign
+myvars <- paste(myvars, collapse="+")
+
+formula_group <- as.formula(paste('SubGroup ~ ', myvars))
+
+# MICT_log <- MICT
+# 
+# MICT_log[1:13] <- MICT_log[1:13]
+
+#is.infinite(MICT_log$Tryptamine)
+
+#MICT_log[32,11] <- NA
+
+summary(tableby(formula_group, data=MICT[, c(1:12, 14)], 
+                numeric.stats=c("median","q1q3", "min", "max", "mean", "sd"),
+                numeric.test = "kwt"), pfootnote=TRUE, total=FALSE)
+
+```
+
+**Pairwise Dunn's Tests:**
+
+```{r}
+dunn_testv <- Vectorize(dunn_test, vectorize.args="formula", SIMPLIFY=F)
+reformulatev <- Vectorize(reformulate, vectorize.args="response")
+
+dunn_res <- dunn_testv(MICT, reformulatev("SubGroup", names(MICT)[c(2, 4:7, 12)]), p.adjust.method="BH")
+                       
+dunn_res
+
+```
+
+Collect all Dunn's results in one dataframe:
+
+```{r, results="asis"}
+
+dunn_MICT <- as.data.frame(do.call(rbind, dunn_res))
+
+dunn_MICT$p.adj <- round(dunn_MICT$p.adj, 5)
+
+names(dunn_MICT)[1] <- "Variable"
+
+kable(dunn_MICT[, c(1:3, 8)], caption = "Post-Hoc Dunn's Tests: Serum MICTs") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+dunn_MICT <- dunn_MICT %>% arrange(desc(Variable), desc(group1), group2)
+
+write.csv(dunn_MICT, "MICT_posthocDunn.csv")
+```
+
+
+**Plots of Trp and its mammalian catabolites:**
+
+
+```{r, warning=F, message=F}
+
+
+my_comparisons <- list( c("CIE", "Healthy"), c("LGITL", "Healthy"), c("CIE", "LGITL") )
+
+names(MICT[c(12,8:11, 1:7)])
+
+labs <- c("Tryptophan (µg/mL)", "Kynuenine (µg/mL)", "Kynurenate (ng/mL)", "Serotonin (ng/mL)",
+          "Tryptamine (ng/mL)", "Indoleacetate (ng/mL)", "Indolepropionate (ng/mL)", "Indoleacetamide (ng/mL)", 
+          "Indoleacrylate (ng/mL)", "Indolelactate (ng/mL)", "Indolepyruvate (ng/mL)", "Indolecarboxyaldehyde (ng/mL)")
+
+names(labs) <- names(MICT[c(12,8:11, 1:7)])
+
+ggplot(melt(MICT[, c(12,8:11, 1:7, 14)]), aes(x=SubGroup, y=value, fill = SubGroup) ) + 
+  geom_boxplot() +
+    labs(x = "", 
+         y = "Concentration",
+         fill = "Group") + 
+  theme(legend.position="bottom") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+  facet_wrap(~variable, scales = "free", , labeller = labeller_fx) 
+
+```
+
+\newpage
+
+# **Correlation Analysis** 
+
+I am interested in whether there are statistically significant correlations among serum MICTs and well-established biomarkers of gastrointestinal and pancreatic function: cobalamin, folate, fTLI, fPLI.
+
+As I am testing multiple hypothesis simulataneously, I will correct for false discovery using the BH-FDR method. 
+
+Spearman rank coefficients will be used. 
+
+```{r}
+
+MICT$cobalamin <- meta$Cobalamin[match(rownames(meta), rownames(MICT))]
+
+MICT$folate <- meta$Folate[match(rownames(meta), rownames(MICT))]
+
+MICT$fPLI <- meta$fPLI[match(rownames(meta), rownames(MICT))]
+
+MICT$fTLI <- meta$fTLI[match(rownames(meta), rownames(MICT))]
+
+MICT$Tryptamine[MICT$Tryptamine == 0] <- NA
+
+```
+
+
+## **Cobalamin**
+
+```{r}
+
+library(qvalue)
+
+cor_b12_rho <- MICT[, c(1:12, 15)] %>% cor_test(cobalamin, method = "spearman")
+
+cor_b12_rho$padj <- qvalue::qvalue(cor_b12_rho$p, pi0 = 1)$qvalues
+
+cor_b12_rho <- cor_b12_rho[, c(1:2, 6,3:5, 7)]
+
+kable(cor_b12_rho[cor_b12_rho$padj<0.05,] %>% arrange(cor, padj), 
+      caption = "Spearman's rho: MICTs vs Cobalamin (Raw)") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+## **Folate**
+
+
+```{r}
+
+cor_folate_rho <- log(MICT[, c(1:12, 16)]) %>% cor_test(folate, method = "spearman")
+
+cor_folate_rho$padj <- qvalue::qvalue(cor_folate_rho$p, pi0 = 1)$qvalues
+
+cor_folate_rho <- cor_folate_rho[, c(1:2, 6,3:5, 7)]
+
+kable(cor_folate_rho[cor_folate_rho$padj<0.05, ] %>% arrange(cor, padj),
+      caption = "Spearman's rho: MICTs vs folate") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+## **fPLI**
+
+**Spearman's rho**
+
+```{r}
+
+cor_pli_rho <- MICT[, c(1:12, 17)] %>% cor_test(fPLI, method = "spearman")
+
+cor_pli_rho$padj <- qvalue::qvalue(cor_pli_rho$p, pi0 = 1)$qvalues
+
+cor_pli_rho <- cor_pli_rho[, c(1:2, 6,3:5, 7)]
+
+kable(cor_pli_rho[cor_pli_rho$padj<0.05, ] %>% arrange(cor, padj),
+      caption = "Spearman's rho: MICTs vs fPLI") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+
+## **fTLI**
+
+**Spearman's rho**
+
+```{r}
+
+cor_tli_rho <- MICT[, c(1:12, 18)] %>% cor_test(fTLI, method = "spearman")
+
+cor_tli_rho$padj <- qvalue::qvalue(cor_tli_rho$p, pi0 = 1)$qvalues
+
+cor_tli_rho <- cor_tli_rho[, c(1:2, 6,3:5, 7)]
+
+kable(cor_tli_rho[cor_tli_rho$padj<0.05, ] %>% arrange(cor, padj),
+      caption = "Spearman's rho: MICTs vs fTLI") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+
+```{r}
+cor_rho_all <- rbind(cor_b12_rho, cor_folate_rho, cor_pli_rho, cor_tli_rho)
+
+cor_rho_sig <- cor_rho_all[cor_rho_all$padj<0.05, ]
+
+cor_rho_sig <- cor_rho_sig %>% arrange(var1, desc(cor))
+
+
+```
+
+\newpage
+
+## **Correlation Matrices**
+
+```{r}
+library(Hmisc)
+
+cor_mat_rho <- rcorr(as.matrix(MICT[, c(1:12)]), type = "spearman")
+
+
+#adjust p-values for mutiple comparisons
+
+cor_mat_rho$P[] <- p.adjust(cor_mat_rho$P, method = "BH")
+
+cor_P <- cor_mat_rho$P
+
+#res$P <- matrix(p.adjust(as.vector(as.matrix(res$P)), method='BH'),ncol=17)
+
+rownames(cor_mat_rho$P) <- rownames(cor_mat_rho$r)
+
+rownames(cor_mat_rho$P) <- c("Indoleacetate", "Indolepropionate", "Indoleacetamide",
+                             "Indoleacrylate", "Indolelactate", "Indolepyruvate",
+                             "Indolealdehyde", "Kynurenine", "Kynurenate",
+                             "Serotonin", "Tryptamine", "Tryptophan")
+
+colnames(cor_mat_rho$P) <- colnames(cor_mat_rho$r)
+
+colnames(cor_mat_rho$P) <- c("Indoleacetate", "Indolepropionate", "Indoleacetamide",
+                             "Indoleacrylate", "Indolelactate", "Indolepyruvate",
+                             "Indolealdehyde", "Kynurenine", "Kynurenate",
+                             "Serotonin", "Tryptamine", "Tryptophan")
+
+rownames(cor_mat_rho$r) <- c("Indoleacetate", "Indolepropionate", "Indoleacetamide",
+                             "Indoleacrylate", "Indolelactate", "Indolepyruvate",
+                             "Indolealdehyde", "Kynurenine", "Kynurenate",
+                             "Serotonin", "Tryptamine", "Tryptophan")
+
+colnames(cor_mat_rho$r) <- c("Indoleacetate", "Indolepropionate", "Indoleacetamide",
+                             "Indoleacrylate", "Indolelactate", "Indolepyruvate",
+                             "Indolealdehyde", "Kynurenine", "Kynurenate",
+                             "Serotonin", "Tryptamine", "Tryptophan")
+
+library(corrplot)
+
+corrplot(cor_mat_rho$r, p.mat = cor_mat_rho$P, method = 'color', diag = FALSE, type = 'lower',
+         sig.level = c(0.001, 0.01, 0.05), pch.cex = 0.9, tl.cex = 0.5, tl.col = "black",
+         insig = 'label_sig', pch.col = 'grey', hclust.method	= "centroid", order = "FPC")
+
+```
+
+
+```{r}
+#extract R from corrtest
+cor_R <- colnames(cor_mat_rho$r)
+
+cor.pair_R <- paste(cor_R[row(cor_mat_rho$r)], cor_R[col(cor_mat_rho$r)], sep="_vs_")
+
+i <- lower.tri(cor_mat_rho$r)
+
+cor_res_R <- data.frame(cor.pair_R[i], cor=cor_mat_rho$r[i])
+
+#Dat$Holm <- p.adjust(Dat$p.value, method="holm")
+#Dat
+```
+
+```{r, eval=F}
+#extract padj from corrtest
+cor_padj <- colnames(cor_mat_rho$P)
+
+cor.pair <- paste(cor_padj[row(cor_mat_rho$P)], cor_padj[col(cor_mat_rho$P)], sep="_vs_")
+
+i <- lower.tri(cor_mat_rho$P)
+
+cor_res_padj <- data.frame(cor.pair[i], p.value=cor_mat_rho$P[i])
+
+#Dat$Holm <- p.adjust(Dat$p.value, method="holm")
+#Dat
+```
+
+
+
+```{r, eval=F}
+cor_res_all2 <- cbind(cor_res_R, cor_res_padj)
+
+cor_res_all2 <- cbind(cor_res_all2, do.call(rbind, str_split(cor_res_all2$cor.pair_R.i., "_vs_")))
+
+cor_res_all2 <- cor_res_all2[, c(5:6, 2, 4)]
+
+names(cor_res_all2) <- c("Var1", "Var2", "cor", "p.adj")
+
+cor_res_sig_all <- cor_res_all2[cor_res_all2$p.adj<0.05, ]
+
+cor_res_sig_all <- cor_res_sig_all %>% arrange(desc(Var1), -cor)
+
+cor_res_sig_all$p.adj <- round(cor_res_sig_all$p.adj, 4)
+
+cor_res_sig_all$cor <- round(cor_res_sig_all$cor , 2)
+
+```
+
+
+```{r}
+
+#write out results
+
+write.csv(cor_res_sig_all, "cor_res_sig_all.csv")
+
+
+cor_res_all2 <- cor_res_all2 %>% arrange(desc(Var1), desc(cor), p.adj)
+  
+write.csv(cor_res_all2, "cor_res_all.csv")
+
+
+```
+
+\newpage
+
+# **ANALYSIS OF COMORBIDITIES**
+
+## **Gastrointestinal Co-Morbidities**
+
+These are cats where histopathology of the liver and pancreas were also assessed and where inflammatory lesions were present in the pancreas, liver, or both. 
+
+```{r}
+MICT_comorbid <- MICT
+
+MICT_comorbid$GI_CoMorbid <- meta$GI_COMORBID_HISTO[match(rownames(MICT), rownames(meta))]
+
+GI_comorbid <- MICT_comorbid %>% na.omit(GI_CoMorbid)
+```
+
+
+```{r, results="asis"}
+## create a vector specifying the variable names
+myvars <- names(GI_comorbid)[1:12]
+
+## select the 8th through the last variables
+## paste them together, separated by the + sign
+myvars <- paste(myvars, collapse="+")
+
+formula_group <- as.formula(paste('GI_CoMorbid ~ ', myvars))
+
+kable(summary(tableby(formula_group, data=GI_comorbid[, c(1:12, 19)], 
+                numeric.stats=c("median","q1q3", "min", "max", "mean", "sd"),
+                numeric.test = "kwt"), pfootnote=TRUE, total=FALSE))
+
+
+
+```
+
+```{r}
+
+table(meta$GI_COMORBID_HISTO)
+
+
+```
+
+
+## **Chronic Renal Disease and Hyperthyroidism**
+
+```{r}
+
+table(meta$NonGI_COMORBID)
+
+```
+
+
+```{r}
+MICT_otherCoMorbid <- MICT
+
+MICT_otherCoMorbid$otherCoMorbid <- meta$NonGI_COMORBID[match(rownames(MICT_otherCoMorbid), rownames(meta))]
+
+MICT_otherCoMorbid <- MICT_otherCoMorbid %>% filter(SubGroup != "Healthy")
+
+
+```
+
+```{r, results="asis"}
+## create a vector specifying the variable names
+myvars <- names(MICT_otherCoMorbid)[1:12]
+
+## select the 8th through the last variables
+## paste them together, separated by the + sign
+myvars <- paste(myvars, collapse="+")
+
+formula_group <- as.formula(paste('otherCoMorbid ~ ', myvars))
+
+summary(tableby(formula_group, data=MICT_otherCoMorbid[, c(1:12, 19)], 
+                numeric.stats=c("median","q1q3", "min", "max"),
+                numeric.test = "kwt"), pfootnote=TRUE, total=FALSE)
+
+```
+
